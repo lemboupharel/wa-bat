@@ -4,8 +4,7 @@ const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
-    delay,
-    makeInMemoryStore
+    delay
 } = require("@whiskeysockets/baileys");
 const fs = require('fs-extra');
 const pino = require('pino');
@@ -21,11 +20,25 @@ const autoResponseHandler = require('./src/handlers/autoResponse');
 const SESSION_DIR = './session';
 const CREDS_PATH = './creds.json';
 
-// Store Setup
-const store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
-// Optional: Load store from file if exists
-// if (fs.existsSync('./store.json')) store.readFromFile('./store.json');
-// setInterval(() => store.writeToFile('./store.json'), 10_000);
+// Minimal Store Setup
+const store = {
+    messages: {},
+    loadMessage: async (jid, id) => {
+        const list = store.messages[jid] || [];
+        return list.find(m => m.key.id === id);
+    },
+    bind: (ev) => {
+        ev.on('messages.upsert', ({ messages }) => {
+            for (const msg of messages) {
+                const jid = msg.key.remoteJid;
+                if (!store.messages[jid]) store.messages[jid] = [];
+                store.messages[jid].push(msg);
+                // Keep last 100 messages per chat to save RAM
+                if (store.messages[jid].length > 100) store.messages[jid].shift();
+            }
+        });
+    }
+};
 
 async function startBot() {
     console.log('Starting Bot...');
