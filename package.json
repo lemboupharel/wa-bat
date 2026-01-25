@@ -14,7 +14,8 @@
     "stop": "pm2 stop qasim",
     "restart": "pm2 restart qasim",
     "reload": "pm2 reload qasim",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "clear": "pm2 stop qasim || true && rm -rf session creds.json && echo 'Session cleared. Run npm start to link again.'"
   },
   "keywords": [
     "baileysQr",
@@ -61,6 +62,7 @@
     "phone": "3.1.30",
     "pino": "^8.1.0",
     "pm2": "^5.4.3",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "qrcode-terminal": "^0.12.0"
   }
 }

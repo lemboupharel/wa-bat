@@ -1,84 +1,92 @@
-const { downloadMediaMessage } = require("@whiskeysockets/baileys");
+const { downloadMediaMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const fs = require('fs-extra');
+const path = require('path');
 
 module.exports = async (reaction, sock, store) => {
     try {
         const { key } = reaction;
+        const remoteJid = key.remoteJid;
 
-        // Ensure we have a store and can try to load the message
-        if (!store) {
-            console.log("Store not available for Once View extraction");
+        console.log(`[Reaction] Received reaction for message ${key.id} in ${remoteJid}`);
+
+        // 1. Retrieve message from store (With Retry for decryption/sync)
+        let msg = null;
+        for (let i = 0; i < 5; i++) {
+            msg = await store.loadMessage(remoteJid, key.id);
+            // Check if msg exists AND has non-empty message content
+            if (msg && msg.message && Object.keys(msg.message).length > 0) break;
+
+            console.log(`[Store] Message ${key.id} not found or content empty, retrying... (${i + 1}/5)`);
+            await new Promise(res => setTimeout(res, 2000));
+        }
+
+        if (!msg || !msg.message || Object.keys(msg.message).length === 0) {
+            console.log(`[Error] Message ${key.id} content still missing in store after retries.`);
             return;
         }
 
-        // Attempt to retrieve message from store
-        // store.loadMessage is the standard method if available.
-        // If the message is recent, it should be in the store.
-        const msg = await store.loadMessage(key.remoteJid, key.id);
+        // 2. PsychoBot-V2 "Unpacking" Logic
+        let content = msg.message;
 
-        if (!msg) {
-            console.log(`Message ${key.id} not found in store.`);
+        // Sequential peeling of wrappers
+        if (content.ephemeralMessage) content = content.ephemeralMessage.message;
+        if (content.viewOnceMessage) content = content.viewOnceMessage.message;
+        if (content.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
+        if (content.viewOnceMessageV2Extension) content = content.viewOnceMessageV2Extension.message;
+
+        const msgType = Object.keys(content)[0];
+        const mediaMsg = content[msgType];
+
+        const isMedia = ['imageMessage', 'videoMessage', 'audioMessage'].includes(msgType);
+
+        if (!isMedia) {
+            console.log("[Error] Reacted message is not a recognized media type.");
+            console.log("[Debug] Unpacked keys:", JSON.stringify(Object.keys(content || {})));
             return;
         }
 
-        // Check if it is a ViewOnce message
-        // Baileys structure: message.message.viewOnceMessage or viewOnceMessageV2
-        const viewOnceMsg = msg.message?.viewOnceMessage || msg.message?.viewOnceMessageV2;
+        console.log(`[Extract] ${msgType.replace('Message', '').toUpperCase()} (Psycho-Logic) detected! Downloading...`);
 
-        if (viewOnceMsg) {
-            console.log("ViewOnce message detected, extracting...");
-
-            // The content is inside the viewOnceMessage shell
-            const content = viewOnceMsg.message;
-            const msgType = Object.keys(content)[0];
-            const mediaMsg = content[msgType];
-
-            // Download media
+        // 3. Download using downloadMediaMessage (PsychoBot Primitive)
+        try {
             const buffer = await downloadMediaMessage(
                 msg,
                 'buffer',
                 {},
                 {
                     logger: console,
-                    // reuploadRequest: sock.updateMediaMessage // sometimes needed
+                    reuploadRequest: sock.updateMediaMessage
                 }
             );
 
-            if (buffer) {
-                // Send back to the user (in DM or same chat?)
-                // User said "send it into my proper inbox". 
-                // Assuming "proper inbox" means "Saved Messages" (dm to self) or just replying to the chat.
-                // Sending to self (bot's number) is usually what "inbox" implies if responding to a status or group msg.
-                // But if it's a DM, sending it back is fine.
-                // Let's send it to the user who reacted (the bot owner likely, per requirements "when i react").
-                // If the bot is reacting, it's weird. Usually the OWNER reacts.
-                // If the owner reacts, we send it to the owner's DM (Note to self feature).
+            if (buffer && buffer.length > 0) {
+                const ownerJid = jidNormalizedUser(sock.user.id);
+                const destination = ownerJid;
 
-                // Identify owner: sock.user.id
-                // Identify reactor: reaction.participant || reaction.key.participant (if group)
-
-                const reactor = reaction.participant || reaction.key.participant || key.remoteJid;
-
-                // If the reactor is NOT the bot owner (the one running the bot), maybe we shouldn't send it?
-                // Request says: "when i react ... it should download ... send it into my proper inbox"
-                // This implies authentication (only owner).
-
-                // For now, let's just send it to the reactor's DM.
-
-                // Prepare message content
                 let options = {};
+                const sender = key.participant || remoteJid;
+                const caption = `🔓 *Psycho-Extract: ViewOnce Extracted*\n\n*From:* @${sender.split('@')[0]}\n*Type:* ${msgType.replace('Message', '').toUpperCase()}`;
+
                 if (msgType === 'imageMessage') {
-                    options = { image: buffer, caption: "ViewOnce Extracted 🔓" };
+                    options = { image: buffer, caption, mentions: [sender] };
                 } else if (msgType === 'videoMessage') {
-                    options = { video: buffer, caption: "ViewOnce Extracted 🔓" };
+                    options = { video: buffer, caption, mentions: [sender] };
+                } else if (msgType === 'audioMessage') {
+                    options = { audio: buffer, mimetype: mediaMsg.mimetype || 'audio/ogg', ptt: mediaMsg.ptt };
                 } else {
-                    options = { document: buffer, caption: "ViewOnce Extracted 🔓" };
+                    options = { document: buffer, mimetype: mediaMsg.mimetype, fileName: mediaMsg.fileName || 'extracted_media' };
                 }
 
-                await sock.sendMessage(reactor, options);
-                console.log("ViewOnce extracted and sent.");
+                await sock.sendMessage(destination, options);
+                console.log(`[Success] ViewOnce extracted and sent to ${destination}`);
+            } else {
+                console.log("[Error] Downloaded buffer is empty or failed.");
             }
+        } catch (downloadErr) {
+            console.error('[EXTRACT] Download Error:', downloadErr.message);
         }
+
     } catch (err) {
-        console.error("Error in OnceView extraction:", err);
+        console.error('[EXTRACT] Critical Error:', err);
     }
 };
